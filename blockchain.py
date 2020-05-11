@@ -9,6 +9,8 @@ import requests
 from flask import Flask, jsonify, request
 
 
+SHARD_SIZE = 2                   # shard size
+
 
 class Blockchain:
     def __init__(self):
@@ -17,7 +19,6 @@ class Blockchain:
         self.nodes = set()
 
         # Subnet fields
-        SHARD_SIZE = 2                   # shard size
         self.leaders = [0]               # subnet leaders
         self.micronodes = []             # subnet members
         self.ledger_length = 0           # ledger length
@@ -82,6 +83,7 @@ class Blockchain:
 
         return True
 
+
     def resolve_conflicts(self):
         """
         This is our consensus algorithm, it resolves conflicts
@@ -98,7 +100,7 @@ class Blockchain:
 
         # Grab and verify the chains from all the nodes in our network
         for node in neighbours:
-            response = requests.get("http://{}/chain".format(node))
+            response = requests.get("{}/chain".format(node))
 
             if response.status_code == 200:
                 length = response.json()['length']
@@ -128,15 +130,15 @@ class Blockchain:
         :return: None
         """
         for mn in self.micronodes:
-            response = requests.get("http://"+mn+"/clear_chain")
+            response = requests.get(mn+"/chain/clear")
         leaders = self.leaders
         for i, block in zip(range(len(new_chain)), new_chain):
             if i/SHARD_SIZE > len(leaders):
                 for j in range(i/SHARD_SIZE - len(leaders)):
-                    prev=leaders[len(leaders)-1] if len(leaders) else -1
+                    prev = leaders[len(leaders)-1] if len(leaders) else -1
                     leaders.append((prev + 1) % len(micronodes))
-            mn = self.micronodes[leaders[i/SHARD_SIZE]]
-            response = requests.post("http://"+mn+"/append_chain", data=block)
+            mn = self.micronodes[leaders[i/SHARD_SIZE]][-1]
+            response = requests.post(mn+"/chain/append", data=block)
 
         return None
 
@@ -173,19 +175,31 @@ class Blockchain:
                 'proof': proof,
                 'previous_hash': previous_hash or self.hash(self.chain[-1]),
                 }
-        if len(self.leaders) and node_identifier == self.micronodes[leader]:
+        if len(self.micronodes) and node_identifier == self.micronodes[leader][0]:
             # Reset the current list of transactions
             self.current_transactions = []
 
             self.chain.append(block)
             # Elect a new leader
             if (len(self.chain) % SHARD_SIZE) == 0:
-                self.leaders.append((leader + 1) % len(micronodes))
+                self.leaders.append((leader + 1) % len(self.micronodes))
 
-        elif len(self.micronodes)>0 and node_identifier == self.micronodes[0]:
-            block=requests.post("http://"+leader+"/new_bock", data=block)
+        elif len(self.micronodes) and node_identifier == self.micronodes[0][0]:
+            block = requests.get(self.micronodes[leader][1]+"/mine").json()
         self.ledger_length += 1
         return block
+
+
+    def is_leader(self):
+        leader = self.leaders[len(self.leaders)-1]
+        return len(self.micronodes) and node_identifier==self.micronodes[leader][0]
+
+    def is_first(self):
+        return len(self.micronodes) and node_identifier==self.micronodes[0][0]
+
+    def is_tx_ready(self):
+        return not len(self.micronodes) or self.is_leader() or self.is_first()
+
 
     def new_transaction(self, sender, recipient, amount):
         """
@@ -197,37 +211,42 @@ class Blockchain:
         :return: The index of the Block that will hold this transaction
         """
         leader = self.leaders[len(self.leaders)-1]
-        if len(self.leaders) and node_identifier == self.micronodes[leader]:
+        if len(self.micronodes) and node_identifier == self.micronodes[leader][0]:
             self.current_transactions.append({
                 'sender': sender,
                 'recipient': recipient,
                 'amount': amount,
             })
             return self.last_block['index'] + 1
-        elif len(self.micronodes) and node_identifier == self.micronodes[0]:
+        elif len(self.micronodes) and node_identifier == self.micronodes[0][0]:
             t = {'sender': sender, 'recipient': recipient, 'amount': amount}
-            return requests.post("http://"+leader+"/new_transaction", data=t)
+            r =requests.post(self.micronodes[leader][1]+"/transactions/new",data=t)
+            if r.status_code == 201:
+                return r.json()['index'] 
         return -1
 
     @property
     def last_block(self):
         leader = self.leaders[len(self.leaders)-1]
-        if len(self.leaders) and node_identifier == self.micronodes[leader]:
-            return self.chain[-1]
-        else:
-            return requests.post("http://"+leader+"/last_block", data=block)
+        if len(self.micronodes) and node_identifier == self.micronodes[leader][0]:
+            return self.chain[-1] if len(self.chain) else {'proof': 0, 'index':0}
+        elif len(self.micronodes) and node_identifier == self.micronodes[0][0]:
+            resp = requests.get(self.micronodes[leader][1]+"/last_block").json()
+            return resp['last_block']
+        return {'index': 0, 'proof': 0}
 
     @property
     def full_chain(self):
         leader = self.leaders[len(self.leaders)-1]
         if len(self.micronodes) <= 1:
             return self.chain
-        else:
+        elif self.is_leader():
+            return self.chain # TODO: fix map_async() & use code below
             (fchain, ns) = ([], self.micronodes)
-            get_chain = lambda i, mn: requests.get("http://"+mn+"/chain")
+            get_chain=lambda i,mn:requests.get(mn[1]+"/chain/shard").json()['chain']
             for c in map_async(get_chain, ns):
                 fchain.append(c)
-            return fchain # TODO: sort by i in map_async() above
+            return fchain # TODO: sort by leaders order
 
 
     @staticmethod
@@ -252,7 +271,7 @@ class Blockchain:
         :param last_block: <dict> last Block
         :return: <int>
         """
-
+ 
         last_proof = last_block['proof']
         last_hash = self.hash(last_block)
 
@@ -319,7 +338,10 @@ def mine():
 
 @app.route('/transactions/new', methods=['POST'])
 def new_transaction():
-    values = request.get_json()
+    values = request.form
+
+    if not blockchain.is_tx_ready():
+        return "Is not leader or first in subnet", 200
 
     # Check that the required fields are in the POST'ed data
     required = ['sender', 'recipient', 'amount']
@@ -329,7 +351,7 @@ def new_transaction():
     # Create a new Transaction
     index = blockchain.new_transaction(values['sender'], values['recipient'], values['amount'])
 
-    response = {'message':"Transaction will be added to Block {}".format(index)}
+    response = {'message':"Transaction added {}".format(index), 'index':index}
     return jsonify(response), 201
 
 
@@ -343,7 +365,16 @@ def full_chain():
     return jsonify(response), 200
 
 
-@app.route('/clear_chain', methods=['GET'])
+@app.route('/chain/shard', methods=['GET'])
+def shard():
+    response = {
+        'chain': blockchain.chain,
+        'length': len(blockchain.chain),
+    }
+    return jsonify(response), 200
+
+
+@app.route('/chain/clear', methods=['GET'])
 def clear_chain():
     blockchain.chain = []
     response = {
@@ -353,9 +384,9 @@ def clear_chain():
     return jsonify(response), 200
 
 
-@app.route('/append_chain', methods=['GET'])
+@app.route('/chain/append', methods=['GET'])
 def append_chain():
-    values = request.get_json()
+    values = request.form
     block = values.get('block')
     blockchain.append_chain(block)
     response = {
@@ -365,11 +396,21 @@ def append_chain():
     return jsonify(response), 200
 
 
+@app.route('/last_block', methods=['GET'])
+def last_block():
+    b = blockchain.chain[-1] if len(blockchain.chain) else {'proof': 0, 'index':0}
+    response = {
+        'last_block': b
+    }
+
+    return jsonify(response), 200
+
+
 @app.route('/nodes/register', methods=['POST'])
 def register_nodes():
-    values = request.get_json()
+    values = request.form
 
-    nodes = values.get('nodes')
+    nodes = list(filter(len, values.get('nodes').split(",")))
     if nodes is None:
         return "Error: Please supply a valid list of nodes", 400
 
@@ -385,27 +426,27 @@ def register_nodes():
 
 @app.route('/nodes/registersubnet', methods=['POST'])
 def register_subnet():
-    values = request.get_json()
+    values = request.form
 
-    nodes = values.get('nodes')
+    nodes = list(filter(len, values.get('nodes').split(",")))
     if nodes is None:
         return "Error: Please supply a valid list of nodes", 400
 
-    node_ids = ids(nodes)
+    node_ids = [requests.get(n+"/id").json()['id'] for n in nodes]
     if not node_identifier in node_ids:
         return "Node is not included in subnet", 200
 
-    blockchain.register_micronodes(node_ids)
+    blockchain.register_micronodes(list(zip(node_ids, nodes)))
 
     response = {
         'message': 'New micronodes have been added',
-        'total_nodes': list(blockchain.nodes + blockchain.micronodes),
+        'total_nodes': list(list(blockchain.nodes) + blockchain.micronodes),
     }
     return jsonify(response), 201
 
 
 @app.route('/id', methods=['GET'])
-def consensus():
+def id():
     response = {
         'id': node_identifier
     }

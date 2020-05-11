@@ -1,0 +1,80 @@
+# Config file specifying application/domain specific commands and scripts
+variables:
+    solr-host: 
+        - 127.0.0.1
+    cassandra-host: 
+        - 127.0.0.1
+    application-host: 127.0.0.1
+    db-host: 127.0.0.2
+    search-host: 127.0.0.3
+    lqn-model: '/home/ubuntu/woodside/lstm_ekf/testbed.lqn'
+    solr-url: 'https://<search-host>:8983/solr'
+    application-url: 'http://127.0.0.1:8878'
+    cassandra-home: '/home/ubuntu/woodside/apache-cassandra-3.11.2'
+
+
+provision-cmds: 
+
+deprovision-cmds: 
+    solr: "for i in {1..3}; do curl '<application-url>/removesearchendpoint'; done"
+    db: "for i in {1..3}; do curl '<application-url>/removedbendpoint'; done"
+
+
+search-endpoint: "http://<application-host>:8878/searchremote?q=*:*"
+
+db-endpoint: "http://localhost:5{0:03}/nodes/register"
+register-nodes: "http://localhost:5{0:03}/nodes/register"
+register-subnets: "http://localhost:5{0:03}/nodes/registersubnet"
+
+db-endpoint2: "http://<application-host>:8878/fetchRemote?q="
+
+login-127.0.0.1: "ssh -i 'workkeypair.pem' ec2-user@<application-host>"
+
+login-127.0.0.2: "ssh -i 'workkeypair.pem' ec2-user@<db-host>"
+
+login-127.0.0.3: "ssh -i 'workkeypair.pem' ec2-user@<search-host>"
+
+memory-cmd-<application-host>: "top -b -n 1 -a"
+
+activity-cmd: "python src/test_app.py"
+
+lqn-out: "system.lqn.out"
+
+lqn-range: [50,20]
+
+#lqn-noise-factor: [0.00002,0.00002,0.00002,0.00001,0.00002,0.000000002,0.00002]
+lqn-noise-factor: [2,0.2,0.2,0.1,0.2,0.00002,0.2]
+
+lqn-tasks:
+        - nSearch: 0
+        - nDb: 0
+        - nWebServers: 1
+
+lqn-thresholds: 
+        - upper: 0.9
+        - upper: 0.9
+        - upper: 0.3
+
+lqn-hosts:
+        - "<search-host>"
+        - "<db-host>"
+        - "<application-host>"
+
+
+lqn-provision-actions:
+        - "for i in {1..3}; do curl '<application-url>/addsearchendpoint'; done"
+        - "for i in {1..3}; do curl '<application-url>/adddbendpoint'; done"
+        - "curl '<application-url>/fetch?q='"
+
+
+lqn-deprovision-actions:
+        - "for i in {1..3}; do curl '<application-url>/removesearchendpoint'; done"
+        - "for i in {1..3}; do curl '<application-url>/removedbendpoint'; done"
+        - "curl '<application-url>/fetch?q='"
+
+
+model-update-cmd: "sed -i 's/<param0>\\s*=\\s*\\[[0-9,\\. ]*\\]/<param0> = <param1>/' <lqn-model>"
+
+model-solve-cmd: "wine lqns <lqn-model>"
+
+traffic-cmd: "for i in {1..1000000}; do echo $i; curl '<endpoint>' 1>/dev/null; done"
