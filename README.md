@@ -47,6 +47,13 @@ $ docker run --rm -p 82:5000 blockchain
 $ docker run --rm -p 83:5000 blockchain
 ```
 
+5. To test use the src/client.py script as shown below (choose [n|k|i|f|register]):
+
+```
+$ for x in {5000..5009}; do ( python3.6 blockchain.py -p $x & ); done
+$ python3.6 src/client.py -n 10 -k 8 -f 5 -i 3 --register
+```
+
 ## Installation (C# Implementation)
 
 1. Install a free copy of Visual Studio IDE (Community Edition):
